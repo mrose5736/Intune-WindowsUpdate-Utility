@@ -176,12 +176,12 @@ function Load-RingDevices {
         $DeviceList = New-Object System.Collections.ObjectModel.ObservableCollection[Object]
         
         foreach ($Status in $Statuses) {
-            # We assume UserPrincipalName/DeviceName might be populated, depending on the expanding
-            # If not, we might need to fetch device details separately if names are missing
+            # Map Graph API properties to UI
+            # Note: Property names are specific to the DeviceConfigurationDeviceStatus object
             
             $DeviceList.Add([PSCustomObject]@{
-                DeviceName      = $Status.DeviceName
-                UserPrincipalName = $Status.UserPrincipalName
+                DeviceName      = $Status.DeviceDisplayName
+                UserPrincipalName = if ($Status.UserName) { $Status.UserName } else { $Status.UserPrincipalName }
                 DeviceModel     = $Status.DeviceModel
                 Status          = $Status.ComplianceStatus
                 LastCheckin     = $Status.LastReportedDateTime
