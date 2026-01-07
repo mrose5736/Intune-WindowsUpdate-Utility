@@ -254,45 +254,52 @@ function Load-RingDevices {
        Load-DeviceCache
     }
 
+    # Get Access Token from main session to pass to background job
+    # Try different methods to retrieve the token safely
+    $Token = $null
+    try {
+        if ([Microsoft.Graph.PowerShell.Authentication.GraphSession]::Instance.CurrentAccessToken) {
+             # SecureString to PlainText if needed, or mostly it's a bearer string
+             $Token = [Microsoft.Graph.PowerShell.Authentication.GraphSession]::Instance.CurrentAccessToken
+        }
+    } catch {
+        # Fallback or older versions
+    }
+
     # Pass data to Runspace
     $Runspace = [runspacefactory]::CreateRunspace()
     $Runspace.Open()
     $PowerShell = [powershell]::Create()
     $PowerShell.Runspace = $Runspace
     
-    # Pass variables: RingId, DeviceCache (for lookup)
-    # We pass DeviceCache as a simple hashtable. 
-    # Note: Passing large objects can be slow, but for 1000s of devices it's acceptable.
-    
     $ScriptBlock = {
-        param($RingId, $DeviceCache)
+        param($RingId, $DeviceCache, $AccessToken)
         
-        # We need authentication in the runspace. 
-        # Since we use 'CurrentUser' scope for modules, we might relies on cached token if possible.
-        # However, Connect-MgGraph usually needs to run per session.
-        # BETTER APPROACH: Fetch data here, but for now we assume token is available or we re-connect.
-        # Re-connecting might prompt UI.
-        # WORKAROUND: Graph SDK in a background thread requires context.
-        # To avoid complex Auth logic in Runspace, we will Fetch the RAW data in main thread if fast enough, 
-        # OR just acknowledge that 'DeviceCache' lookup is the slow part?
-        # Actually, the 'Get-Mg...' call is the network call.
-        
-        # Let's try to get the access token from the main session
-        # $Context = Get-MgContext
-        
-        # For simplicity in this script, we'll try to rely on the existing token cache.
-        # If this fails, we gracefully error.
-        
+        Import-Module Microsoft.Graph.Authentication -ErrorAction SilentlyContinue
         Import-Module Microsoft.Graph.DeviceManagement -ErrorAction SilentlyContinue
         
-        try {
-             # Note: background jobs might need 'Connect-MgGraph' again if the context isn't shared.
-             # Shared Token Cache should work for CurrentUser.
-             # We might need to pass the AccessToken explicitly if this fails.
-        } catch {}
+        # Re-authenticate in this runspace using the passed token
+        if ($AccessToken) {
+            # Convert SecureString to string if necessary, but usually Connect-MgGraph takes SecureString or String depending on version
+            # We assume it accepts the object we passed.
+            try {
+                Connect-MgGraph -AccessToken $AccessToken -ErrorAction Stop
+            } catch {
+                Write-Error "Failed to authenticate in background job: $_"
+                return
+            }
+        } else {
+             Write-Error "No access token provided to background job."
+             return
+        }
 
         # Fetch device statuses
-        $Statuses = Get-MgDeviceManagementDeviceConfigurationDeviceStatus -DeviceConfigurationId $RingId -All
+        try {
+            $Statuses = Get-MgDeviceManagementDeviceConfigurationDeviceStatus -DeviceConfigurationId $RingId -All -ErrorAction Stop
+        } catch {
+            Write-Error "Failed to fetch statuses: $_"
+            return
+        }
         
         $Results = @()
         foreach ($Status in $Statuses) {
@@ -315,7 +322,7 @@ function Load-RingDevices {
         return $Results
     }
 
-    $PowerShell.AddScript($ScriptBlock).AddArgument($RingId).AddArgument($Script:DeviceCache) | Out-Null
+    $PowerShell.AddScript($ScriptBlock).AddArgument($RingId).AddArgument($Script:DeviceCache).AddArgument($Token) | Out-Null
     
     $AsyncResult = $PowerShell.BeginInvoke()
     
@@ -328,13 +335,21 @@ function Load-RingDevices {
             $Script:CurrentPowerShell.InvocationStateInfo.State -eq 'Failed') {
             
             $Script:JobTimer.Stop()
-            $Script:JobTimer.Remove_Tick($Script:JobTimer.Tick) # create infinite loops if not careful? No, we remove all handler or specific one.
-            # Easiest is just stop.
+            $Script:JobTimer.Remove_Tick($Script:JobTimer.Tick) 
             
             Show-Loading $false
             
             try {
                 $DeviceList = $Script:CurrentPowerShell.EndInvoke($AsyncResult)
+                
+                # Check for errors in the stream
+                if ($Script:CurrentPowerShell.Streams.Error.Count -gt 0) {
+                    foreach ($Err in $Script:CurrentPowerShell.Streams.Error) {
+                        Write-Warning "Background Job Error: $($Err.Exception.Message)"
+                    }
+                     Update-Status "Error loading data. See console for details."
+                }
+                
                 $Script:CurrentPowerShell.Dispose()
                 
                 $ObservableDevices = New-Object System.Collections.ObjectModel.ObservableCollection[Object]
@@ -347,8 +362,7 @@ function Load-RingDevices {
                 Update-VisualSummary $ObservableDevices
             }
             catch {
-                Update-Status "Available data loaded. (Background job had warnings)"
-                # Write-Error $_
+                Update-Status "Critical Error in background job: $_"
             }
         }
     })
