@@ -90,6 +90,7 @@ Add-Type -AssemblyName PresentationFramework
                         <DataGridTextColumn Header="Device Name" Binding="{Binding DeviceName}" Width="*"/>
                         <DataGridTextColumn Header="User" Binding="{Binding UserPrincipalName}" Width="150"/>
                         <DataGridTextColumn Header="Model" Binding="{Binding DeviceModel}" Width="150"/>
+                        <DataGridTextColumn Header="OS Version" Binding="{Binding OSVersion}" Width="120"/>
                         <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="100"/>
                         <DataGridTextColumn Header="Last Check-in" Binding="{Binding LastCheckin}" Width="150"/>
                     </DataGrid.Columns>
@@ -131,10 +132,29 @@ $LblLastUpdated = Get-Ctrl "LblLastUpdated"
 # --- Logic Functions ---
 
 $Script:RingLookup = @{}
+$Script:DeviceCache = @{}
 
 function Update-Status {
     param($Message)
     $TxtStatus.Dispatcher.Invoke([action]{ $TxtStatus.Text = $Message })
+}
+
+function Load-DeviceCache {
+    Update-Status "Caching Windows Device Details..."
+    $Script:DeviceCache.Clear()
+    try {
+        # Fetch only Windows devices, get OS version
+        $Devices = Get-MgDeviceManagementManagedDevice -Filter "operatingSystem eq 'Windows'" -Property DeviceName, OSVersion, UserId
+        foreach ($Dev in $Devices) {
+            if ($Dev.DeviceName) {
+                $Script:DeviceCache[$Dev.DeviceName] = $Dev
+            }
+        }
+        Update-Status "Cached $($Devices.Count) Windows devices."
+    }
+    catch {
+        Write-Warning "Failed to cache devices: $_"
+    }
 }
 
 function Load-Rings {
@@ -168,6 +188,11 @@ function Load-RingDevices {
     Update-Status "Loading devices for '$RingName'..."
     $GridDevices.ItemsSource = $null
     
+    # Ensure cache is populated (lazy load if needed, but we do it on start usually)
+    if ($Script:DeviceCache.Count -eq 0) {
+       Load-DeviceCache
+    }
+
     try {
         # Fetch device statuses for this config
         # Simply fetching All properties to ensure we get everything
@@ -179,13 +204,20 @@ function Load-RingDevices {
             # Map Graph API properties to UI
             # Fix: Use 'Status' instead of 'ComplianceStatus'
             
-            $DeviceList.Add([PSCustomObject]@{
-                DeviceName      = $Status.DeviceDisplayName
-                UserPrincipalName = if ($Status.UserName) { $Status.UserName } else { $Status.UserPrincipalName }
-                DeviceModel     = if ($Status.DeviceModel) { $Status.DeviceModel } else { "N/A" }
-                Status          = $Status.Status
-                LastCheckin     = $Status.LastReportedDateTime
-            })
+            # Filter: "Please only show Windows Devices"
+            # We strictly check if the device exists in our Windows-only DeviceCache
+            if ($Script:DeviceCache.ContainsKey($Status.DeviceDisplayName)) {
+                $CachedDev = $Script:DeviceCache[$Status.DeviceDisplayName]
+                
+                $DeviceList.Add([PSCustomObject]@{
+                    DeviceName      = $Status.DeviceDisplayName
+                    UserPrincipalName = if ($Status.UserName) { $Status.UserName } else { $Status.UserPrincipalName }
+                    DeviceModel     = if ($Status.DeviceModel) { $Status.DeviceModel } else { "N/A" }
+                    OSVersion       = $CachedDev.OSVersion
+                    Status          = $Status.Status
+                    LastCheckin     = $Status.LastReportedDateTime
+                })
+            }
         }
         
         $GridDevices.ItemsSource = $DeviceList
@@ -212,6 +244,7 @@ $ListRings.Add_SelectionChanged({
 # --- Initial Load ---
 # Delay slightly to let window render
 $Window.Add_Loaded({
+    Load-DeviceCache
     Load-Rings
 })
 
