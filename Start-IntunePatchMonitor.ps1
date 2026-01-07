@@ -170,20 +170,20 @@ function Load-RingDevices {
     
     try {
         # Fetch device statuses for this config
-        # Note: This checks the assignment status (Succeeded/Error/Pending) for the policy
+        # Simply fetching All properties to ensure we get everything
         $Statuses = Get-MgDeviceManagementDeviceConfigurationDeviceStatus -DeviceConfigurationId $RingId -All
         
         $DeviceList = New-Object System.Collections.ObjectModel.ObservableCollection[Object]
         
         foreach ($Status in $Statuses) {
             # Map Graph API properties to UI
-            # Note: Property names are specific to the DeviceConfigurationDeviceStatus object
+            # Fix: Use 'Status' instead of 'ComplianceStatus'
             
             $DeviceList.Add([PSCustomObject]@{
                 DeviceName      = $Status.DeviceDisplayName
                 UserPrincipalName = if ($Status.UserName) { $Status.UserName } else { $Status.UserPrincipalName }
-                DeviceModel     = $Status.DeviceModel
-                Status          = $Status.ComplianceStatus
+                DeviceModel     = if ($Status.DeviceModel) { $Status.DeviceModel } else { "N/A" }
+                Status          = $Status.Status
                 LastCheckin     = $Status.LastReportedDateTime
             })
         }
